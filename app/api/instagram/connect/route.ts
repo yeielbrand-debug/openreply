@@ -31,7 +31,11 @@ export async function GET(request: NextRequest) {
   // Instagram accounts it was granted. When we already know the id (a business
   // asset shown in the dashboard/dialog), pass it as ?account=<ig id> and the
   // callback connects it directly.
-  const account = request.nextUrl.searchParams.get("account") ?? undefined;
+  const accountParam = request.nextUrl.searchParams.get("account");
+  // Only an all-digits Instagram account id; the callback still verifies the
+  // token can actually read it before connecting.
+  const account =
+    accountParam && /^\d+$/.test(accountParam) ? accountParam : undefined;
   const redirectUri = `${getBaseUrl()}/api/instagram/callback`;
   const state = createOAuthState(context.workspaceId, account);
 

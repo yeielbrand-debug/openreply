@@ -91,15 +91,23 @@ export async function GET(request: NextRequest) {
     const tokenExpiresAt = new Date(Date.now() + expiresIn * 1000);
 
     let connected = 0;
+    const failures: Array<{ instagramId: string; reason: string }> = [];
     for (const instagramId of igIds) {
-      let username = instagramId;
-      let name: string | null = null;
+      // Prove the token can read this account before connecting it. This blocks
+      // storing an id the caller passed but the token can't reach (IDOR), and
+      // never stores a connection that couldn't work.
+      let username: string;
+      let name: string | null;
       try {
         const info = await getUserInfo(longLivedToken, instagramId);
         username = info.username ?? instagramId;
         name = info.name ?? null;
       } catch (infoError) {
+        const reason =
+          infoError instanceof Error ? infoError.message : String(infoError);
         console.warn("[Instagram Callback] getUserInfo failed:", infoError);
+        failures.push({ instagramId, reason: reason.slice(0, 300) });
+        continue;
       }
 
       let webhookSubscribed = false;
@@ -145,6 +153,21 @@ export async function GET(request: NextRequest) {
         });
       }
       connected++;
+    }
+
+    if (connected === 0) {
+      await prisma.operationalEvent
+        .create({
+          data: {
+            source: "SYSTEM",
+            level: "ERROR",
+            workspaceId: state.workspaceId,
+            message: "Instagram connect: token could not read any account",
+            payload: { failures },
+          },
+        })
+        .catch(() => {});
+      return NextResponse.redirect(`${baseUrl}/settings?instagram=no_access`);
     }
 
     return NextResponse.redirect(
