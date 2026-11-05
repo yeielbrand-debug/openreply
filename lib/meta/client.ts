@@ -1,7 +1,12 @@
 import { getMetaGraphApiVersion, requireEnv } from "@/lib/env";
 
+// Unified login (Facebook Login for Business) serves the Instagram messaging,
+// comments, media and insights edges from graph.facebook.com, not
+// graph.instagram.com. New Meta apps can only use unified login, so every
+// Instagram business call goes through the Facebook host with the account's
+// system-user token (SUAT).
 function instagramGraphBase() {
-  return `https://graph.instagram.com/${getMetaGraphApiVersion()}`;
+  return `https://graph.facebook.com/${getMetaGraphApiVersion()}`;
 }
 
 function facebookGraphBase() {
@@ -664,16 +669,28 @@ export async function getConversationMessages(
   return data.messages?.data ?? [];
 }
 
-export async function getUserInfo(accessToken: string): Promise<InstagramUser> {
-  const url = new URL(`${instagramGraphBase()}/me`);
-  url.searchParams.set(
-    "fields",
-    "id,user_id,username,name,profile_picture_url,followers_count"
-  );
+// Under unified login the token is a system-user token that can see several
+// accounts, so the account is addressed by its id rather than /me. The id here
+// is the Instagram professional account id — the same value that arrives as
+// entry.id in webhooks and is used by the messaging API — so both `id` and
+// `user_id` are set to it. `user_id` is not a field on the Facebook graph IG
+// node, so it is not requested.
+export async function getUserInfo(
+  accessToken: string,
+  igId: string
+): Promise<InstagramUser> {
+  const url = new URL(`${instagramGraphBase()}/${igId}`);
+  // Keep this to the fields every Instagram account type exposes. Asking for
+  // profile_picture_url / followers_count on an account that doesn't support
+  // them makes Graph reject the whole request (#100), so leave those out.
+  url.searchParams.set("fields", "username,name");
   url.searchParams.set("access_token", accessToken);
 
   const response = await fetch(url.toString());
-  return handleResponse<InstagramUser>(response);
+  const data = await handleResponse<Omit<InstagramUser, "id" | "user_id">>(
+    response
+  );
+  return { ...data, id: igId, user_id: igId };
 }
 
 const MEDIA_FIELDS =
@@ -684,9 +701,10 @@ const MEDIA_PAGE_SIZE = 100;
 
 export async function getUserMedia(
   accessToken: string,
+  igId: string,
   limit = 25
 ): Promise<InstagramMedia[]> {
-  const url = new URL(`${instagramGraphBase()}/me/media`);
+  const url = new URL(`${instagramGraphBase()}/${igId}/media`);
   url.searchParams.set("fields", MEDIA_FIELDS);
   url.searchParams.set("limit", limit.toString());
   url.searchParams.set("access_token", accessToken);
@@ -704,11 +722,12 @@ export async function getUserMedia(
  */
 export async function getAllUserMedia(
   accessToken: string,
+  igId: string,
   max = 500
 ): Promise<InstagramMedia[]> {
   const results: InstagramMedia[] = [];
 
-  const first = new URL(`${instagramGraphBase()}/me/media`);
+  const first = new URL(`${instagramGraphBase()}/${igId}/media`);
   first.searchParams.set("fields", MEDIA_FIELDS);
   first.searchParams.set("limit", String(Math.min(MEDIA_PAGE_SIZE, max)));
   first.searchParams.set("access_token", accessToken);

@@ -122,11 +122,12 @@ describe("Instagram provider boundary", () => {
     respond({ data: [{ id: "media" }] });
     expect(
       await getUserMedia({
-        context: { provider: "META", accessToken: "meta" },
+        context: { provider: "META", accessToken: "meta", instagramId: "iguser" },
         limit: 3,
       })
     ).toEqual([{ id: "media" }]);
-    expect(fetchMock.mock.calls[0][0]).toContain("graph.instagram.com");
+    expect(fetchMock.mock.calls[0][0]).toContain("graph.facebook.com");
+    expect(fetchMock.mock.calls[0][0]).toContain("/iguser/media");
   });
   it.each([
     [429, RateLimitError],

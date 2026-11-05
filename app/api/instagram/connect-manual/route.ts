@@ -5,29 +5,26 @@ import {
   getCurrentWorkspaceContext,
 } from "@/lib/workspace-access";
 import { encryptToken } from "@/lib/meta/oauth";
-import {
-  getUserInfo,
-  subscribeInstagramAccountToWebhooks,
-} from "@/lib/meta/client";
+import { subscribeInstagramAccountToWebhooks } from "@/lib/meta/client";
+import { getMetaGraphApiVersion } from "@/lib/env";
 
 export const runtime = "nodejs";
 
-// A long-lived Instagram user token is valid ~60 days; the refresh cron
-// (ig_refresh_token) extends it, so store a real expiry rather than null.
-const LONG_LIVED_TOKEN_SECONDS = 5184000;
-
 /**
- * Connect an Instagram account with a token generated in the Meta App Dashboard.
+ * Connect an Instagram account with a dashboard-generated system-user token.
  *
- * New Meta apps can no longer run the Instagram-login OAuth redirect, so instead
- * of the connect/callback round trip you generate a long-lived token per account
- * in the dashboard (Instagram API use case -> step 2 "Generate access tokens" ->
- * "Add account"/"Generate token") and POST it here. The token is an Instagram
- * user token, so everything after this works exactly like the OAuth path did:
- * we read the profile from graph.instagram.com/me, subscribe the account to the
- * comments + messages webhooks, and store the encrypted token with its expiry.
+ * New Meta apps can't run the Instagram-login OAuth redirect, so you generate a
+ * never-expiring system-user token per account in the App Dashboard (Instagram
+ * API use case -> step 2 "Generate access tokens") and POST it here with the
+ * account id shown next to it. Everything runs server-side, so the token is
+ * never exposed outside this request.
  *
- * Body: { accessToken: string }  (instagramId is derived from the token)
+ * It probes graph.facebook.com for the account first (so a bad token or a field
+ * the account doesn't expose gives a clear answer instead of a silent fail),
+ * subscribes the account to the comments + messages webhooks, and stores the
+ * encrypted token with no expiry (system-user tokens don't expire).
+ *
+ * Body: { accessToken: string, instagramId: string, username?: string }
  */
 export async function POST(request: NextRequest) {
   const context = await getCurrentWorkspaceContext();
@@ -44,7 +41,7 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  let body: { accessToken?: string };
+  let body: { accessToken?: string; instagramId?: string; username?: string };
   try {
     body = await request.json();
   } catch {
@@ -55,86 +52,123 @@ export async function POST(request: NextRequest) {
   }
 
   const accessToken = body.accessToken?.trim();
-  if (!accessToken) {
+  const instagramId = body.instagramId?.trim();
+  if (!accessToken || !instagramId) {
     return NextResponse.json(
-      { success: false, error: "accessToken is required" },
+      { success: false, error: "accessToken and instagramId are required" },
       { status: 400 }
     );
   }
 
-  try {
-    // Validates the token and resolves the account (and username) in one call.
-    // Throws (and we surface the Meta error) if the token is wrong.
-    const info = await getUserInfo(accessToken);
-    const instagramId = String(info.user_id ?? info.id ?? "");
-    if (!instagramId) {
-      return NextResponse.json(
-        { success: false, error: "Could not resolve Instagram account id from token" },
-        { status: 502 }
-      );
-    }
-
-    let webhookSubscribed = false;
+  const base = `https://graph.facebook.com/${getMetaGraphApiVersion()}`;
+  // Token goes in the Authorization header, never the URL, so it can't leak
+  // into server logs.
+  async function graphGet(path: string) {
     try {
-      const subscription = await subscribeInstagramAccountToWebhooks(
-        instagramId,
-        accessToken
-      );
-      webhookSubscribed = Boolean(
-        (subscription as { success?: boolean }).success
-      );
-    } catch (subscriptionError) {
-      console.warn(
-        "[connect-manual] Webhook subscription failed:",
-        subscriptionError
-      );
-    }
-
-    const data = {
-      username: info.username,
-      name: info.name ?? null,
-      accessToken: encryptToken(accessToken),
-      tokenExpiresAt: new Date(Date.now() + LONG_LIVED_TOKEN_SECONDS * 1000),
-      webhookSubscribed,
-    };
-
-    const existing = await prisma.instagramAccount.findUnique({
-      where: { instagramId },
-    });
-    if (existing) {
-      if (existing.workspaceId !== context.workspaceId) {
-        return NextResponse.json(
-          { success: false, error: "Account is connected to another workspace" },
-          { status: 409 }
-        );
-      }
-      await prisma.instagramAccount.update({ where: { id: existing.id }, data });
-    } else {
-      await prisma.instagramAccount.create({
-        data: {
-          ...data,
-          workspaceId: context.workspaceId,
-          instagramId,
-          provider: "META",
-        },
+      const res = await fetch(`${base}/${path}`, {
+        headers: { Authorization: `Bearer ${accessToken}` },
+        cache: "no-store",
       });
+      const text = await res.text();
+      let json: unknown;
+      try {
+        json = JSON.parse(text);
+      } catch {
+        json = text;
+      }
+      return { ok: res.ok, status: res.status, body: json };
+    } catch (err) {
+      return {
+        ok: false,
+        status: 0,
+        body: err instanceof Error ? err.message : String(err),
+      };
     }
+  }
 
-    return NextResponse.json({
-      success: true,
-      data: {
-        instagramId,
-        username: info.username,
-        name: info.name,
-        webhookSubscribed,
-      },
-    });
-  } catch (err) {
-    const message = err instanceof Error ? err.message : "Unknown error";
-    console.error("[connect-manual] Error:", err);
+  // Minimal vs richer fields: if min works but full fails, it's a field the
+  // account doesn't expose; if min fails too, the token can't reach the account.
+  const probeMin = await graphGet(`${instagramId}?fields=username`);
+  const probeFull = await graphGet(
+    `${instagramId}?fields=username,name,followers_count,profile_picture_url`
+  );
+
+  const minUsername =
+    probeMin.ok &&
+    probeMin.body &&
+    typeof probeMin.body === "object" &&
+    "username" in (probeMin.body as Record<string, unknown>)
+      ? String((probeMin.body as Record<string, unknown>).username)
+      : null;
+
+  const canReachAccount = probeMin.ok || probeFull.ok;
+
+  // Don't store an account the token can't even read — the DM send would fail
+  // the same way. Hand back the probes so we can see exactly why.
+  if (!canReachAccount) {
     return NextResponse.json(
-      { success: false, error: message.slice(0, 300) },
+      {
+        success: false,
+        stored: false,
+        error: "Token cannot reach this Instagram account",
+        probes: { min: probeMin, full: probeFull },
+      },
       { status: 502 }
     );
   }
+
+  let webhookSubscribed = false;
+  let subscribeError: string | null = null;
+  try {
+    const subscription = await subscribeInstagramAccountToWebhooks(
+      instagramId,
+      accessToken
+    );
+    webhookSubscribed = Boolean(
+      (subscription as { success?: boolean }).success
+    );
+  } catch (err) {
+    subscribeError = err instanceof Error ? err.message : String(err);
+    console.warn("[connect-manual] Webhook subscription failed:", err);
+  }
+
+  const username = minUsername ?? body.username?.trim() ?? instagramId;
+  const data = {
+    username,
+    accessToken: encryptToken(accessToken),
+    // System-user tokens never expire (confirmed in the token debugger), so the
+    // refresh cron must leave this one alone.
+    tokenExpiresAt: null,
+    webhookSubscribed,
+  };
+
+  const existing = await prisma.instagramAccount.findUnique({
+    where: { instagramId },
+  });
+  if (existing) {
+    if (existing.workspaceId !== context.workspaceId) {
+      return NextResponse.json(
+        { success: false, error: "Account is connected to another workspace" },
+        { status: 409 }
+      );
+    }
+    await prisma.instagramAccount.update({ where: { id: existing.id }, data });
+  } else {
+    await prisma.instagramAccount.create({
+      data: {
+        ...data,
+        workspaceId: context.workspaceId,
+        instagramId,
+        provider: "META",
+      },
+    });
+  }
+
+  return NextResponse.json({
+    success: true,
+    stored: true,
+    data: { instagramId, username, webhookSubscribed },
+    probes: { min: probeMin, full: probeFull },
+    subscribeError,
+  });
 }
