@@ -30,8 +30,8 @@ export function getEncryptionKeyHex(): string {
 // start. Checked up front so a self-hoster with a half-filled .env gets the
 // variable names back instead of an unhandled throw from requireEnv().
 const INSTAGRAM_OAUTH_ENV = [
-  "INSTAGRAM_APP_ID",
-  "INSTAGRAM_APP_SECRET",
+  "FACEBOOK_APP_ID",
+  "FACEBOOK_APP_SECRET",
   "ENCRYPTION_KEY",
   "NEXTAUTH_SECRET",
 ] as const;

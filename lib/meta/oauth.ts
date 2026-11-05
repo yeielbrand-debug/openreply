@@ -5,15 +5,26 @@ import {
   randomBytes,
   timingSafeEqual,
 } from "crypto";
-import { getEncryptionKeyHex, requireEnv } from "@/lib/env";
+import { getEncryptionKeyHex, getMetaGraphApiVersion, requireEnv } from "@/lib/env";
 
-// Instagram API with Instagram Login authorizes on www.instagram.com. The old
-// api.instagram.com/oauth/authorize host belonged to the retired Basic Display
-// API and now 404s ("Sorry, this page isn't available"), which looks like a bad
-// link rather than a wrong endpoint. The token exchange below still lives on
-// api.instagram.com — only the authorize hop moved.
-const INSTAGRAM_OAUTH_URL = "https://www.instagram.com/oauth/authorize";
-const INSTAGRAM_TOKEN_URL = "https://api.instagram.com/oauth/access_token";
+// Unified login (Facebook Login for Business). New Meta apps can't use the
+// retired Instagram-login OAuth, so the person authorizes their Instagram
+// professional account through the Facebook dialog using the app's login
+// configuration. The resulting user token reaches that account on
+// graph.facebook.com — no Facebook Page required. The authorize hop has no API
+// version; the code-for-token exchange is a versioned graph.facebook.com call.
+const FACEBOOK_OAUTH_DIALOG = "https://www.facebook.com/dialog/oauth";
+
+function facebookTokenUrl(): string {
+  return `https://graph.facebook.com/${getMetaGraphApiVersion()}/oauth/access_token`;
+}
+
+// The login configuration that carries the Instagram permissions. Defaults to
+// this app's config; override with META_LOGIN_CONFIG_ID for a different app.
+function loginConfigId(): string {
+  return process.env.META_LOGIN_CONFIG_ID ?? "2077800546956155";
+}
+
 const ALGORITHM = "aes-256-gcm";
 const IV_LENGTH = 16;
 const AUTH_TAG_LENGTH = 16;
@@ -89,47 +100,42 @@ export function verifyOAuthState(state: string | null): OAuthStatePayload | null
 
 export function getAuthorizationUrl(redirectUri: string, state: string): string {
   const params = new URLSearchParams({
-    client_id: requireEnv("INSTAGRAM_APP_ID"),
+    client_id: requireEnv("FACEBOOK_APP_ID"),
+    config_id: loginConfigId(),
     redirect_uri: redirectUri,
-    scope:
-      "instagram_business_basic,instagram_business_manage_messages,instagram_business_manage_comments,instagram_business_manage_insights",
     response_type: "code",
+    // Config-based logins default to a token response; force a code so the
+    // callback runs the server-side exchange.
+    override_default_response_type: "true",
     state,
   });
 
-  return `${INSTAGRAM_OAUTH_URL}?${params.toString()}`;
+  return `${FACEBOOK_OAUTH_DIALOG}?${params.toString()}`;
 }
 
 export async function exchangeCodeForToken(
   code: string,
   redirectUri: string
-): Promise<{ accessToken: string; userId: string }> {
-  const body = new URLSearchParams({
-    client_id: requireEnv("INSTAGRAM_APP_ID"),
-    client_secret: requireEnv("INSTAGRAM_APP_SECRET"),
-    grant_type: "authorization_code",
-    redirect_uri: redirectUri,
-    code,
-  });
+): Promise<{ accessToken: string }> {
+  const url = new URL(facebookTokenUrl());
+  url.searchParams.set("client_id", requireEnv("FACEBOOK_APP_ID"));
+  url.searchParams.set("client_secret", requireEnv("FACEBOOK_APP_SECRET"));
+  url.searchParams.set("redirect_uri", redirectUri);
+  url.searchParams.set("code", code);
 
-  const response = await fetch(INSTAGRAM_TOKEN_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: body.toString(),
-  });
-
+  const response = await fetch(url.toString(), { cache: "no-store" });
   if (!response.ok) {
-    const error = await response.json();
-    throw new Error(
-      `Token exchange failed: ${error.error_message || JSON.stringify(error)}`
-    );
+    let detail: string;
+    try {
+      detail = JSON.stringify(await response.json());
+    } catch {
+      detail = await response.text();
+    }
+    throw new Error(`Token exchange failed: ${detail.slice(0, 300)}`);
   }
 
   const data = await response.json();
-  return {
-    accessToken: data.access_token,
-    userId: String(data.user_id),
-  };
+  return { accessToken: data.access_token };
 }
 
 function getEncryptionKey(): Buffer {

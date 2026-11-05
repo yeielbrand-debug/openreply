@@ -849,10 +849,13 @@ export async function getFollowerCountSeries(
 export async function getLongLivedToken(
   shortLivedToken: string
 ): Promise<{ accessToken: string; expiresIn: number }> {
-  const url = new URL(`${instagramGraphBase()}/access_token`);
-  url.searchParams.set("grant_type", "ig_exchange_token");
-  url.searchParams.set("client_secret", requireEnv("INSTAGRAM_APP_SECRET"));
-  url.searchParams.set("access_token", shortLivedToken);
+  // Unified-login tokens are Facebook user tokens: swap the short-lived one for
+  // a long-lived (~60 day) token with fb_exchange_token.
+  const url = new URL(`${facebookGraphBase()}/oauth/access_token`);
+  url.searchParams.set("grant_type", "fb_exchange_token");
+  url.searchParams.set("client_id", requireEnv("FACEBOOK_APP_ID"));
+  url.searchParams.set("client_secret", requireEnv("FACEBOOK_APP_SECRET"));
+  url.searchParams.set("fb_exchange_token", shortLivedToken);
 
   const response = await fetch(url.toString());
   const data = await handleResponse<TokenResponse>(response);
@@ -863,20 +866,38 @@ export async function getLongLivedToken(
   };
 }
 
+// Re-running fb_exchange_token on a long-lived token issues a fresh ~60 day
+// token, so refreshing is the same exchange.
 export async function refreshLongLivedToken(
   longLivedToken: string
 ): Promise<{ accessToken: string; expiresIn: number }> {
-  const url = new URL(`${instagramGraphBase()}/refresh_access_token`);
-  url.searchParams.set("grant_type", "ig_refresh_token");
-  url.searchParams.set("access_token", longLivedToken);
+  return getLongLivedToken(longLivedToken);
+}
 
-  const response = await fetch(url.toString());
-  const data = await handleResponse<TokenResponse>(response);
-
-  return {
-    accessToken: data.access_token,
-    expiresIn: data.expires_in ?? 5184000,
+/**
+ * The Instagram professional accounts a user token was granted for.
+ *
+ * With unified login there's no Facebook Page to walk: the authorized Instagram
+ * accounts come back as the `target_ids` of the token's granular scopes. We
+ * debug the token with an app access token and collect those ids.
+ */
+export async function getGrantedInstagramAccounts(
+  userToken: string
+): Promise<string[]> {
+  const appToken = `${requireEnv("FACEBOOK_APP_ID")}|${requireEnv(
+    "FACEBOOK_APP_SECRET"
+  )}`;
+  const result = (await debugToken(userToken, appToken)) as {
+    data?: {
+      granular_scopes?: Array<{ scope?: string; target_ids?: string[] }>;
+    };
   };
+
+  const ids = new Set<string>();
+  for (const entry of result.data?.granular_scopes ?? []) {
+    for (const id of entry.target_ids ?? []) ids.add(String(id));
+  }
+  return [...ids];
 }
 
 export async function subscribeInstagramAccountToWebhooks(
