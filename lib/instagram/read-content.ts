@@ -70,7 +70,7 @@ export async function getUserMedia({
   limit?: number;
 }): Promise<meta.InstagramMedia[]> {
   if (context.provider === "META")
-    return meta.getUserMedia(context.accessToken, context.instagramId, limit);
+    return meta.getUserMedia(context.accessToken, limit);
   const result = await zernioRequest<{
     posts: {
       id: string;
@@ -116,7 +116,7 @@ export async function getAllUserMedia({
   max?: number;
 }) {
   return context.provider === "META"
-    ? meta.getAllUserMedia(context.accessToken, context.instagramId, max)
+    ? meta.getAllUserMedia(context.accessToken, max)
     : getUserMedia({ context, limit: max });
 }
 
@@ -125,8 +125,7 @@ export async function getUserInfo({
 }: {
   context: InstagramContext;
 }): Promise<meta.InstagramUser> {
-  if (context.provider === "META")
-    return meta.getUserInfo(context.accessToken, context.instagramId);
+  if (context.provider === "META") return meta.getUserInfo(context.accessToken);
   const result = await zernioRequest<{
     accounts: {
       _id: string;

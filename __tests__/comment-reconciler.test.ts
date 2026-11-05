@@ -25,7 +25,6 @@ vi.mock("@/lib/instagram/provider", async (importOriginal) => ({
   createInstagramContext: async () => ({
     provider: "META",
     accessToken: "local-test",
-    instagramId: "owner",
   }),
   getRecentMediaComments: readComments,
 }));

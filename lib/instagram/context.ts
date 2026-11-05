@@ -2,10 +2,7 @@ import { decryptToken } from "@/lib/meta/oauth";
 import { prisma } from "@/lib/db/client";
 
 export type InstagramContext =
-  // Unified login tokens are system-user tokens that can address several
-  // accounts, so the Instagram account id travels with the context (the
-  // messaging edges that take an explicit id still get it from the caller).
-  | { provider: "META"; accessToken: string; instagramId: string }
+  | { provider: "META"; accessToken: string }
   | {
       provider: "ZERNIO";
       apiKey: string;
@@ -35,11 +32,7 @@ export async function createInstagramContext(
   operationId?: string
 ): Promise<InstagramContext> {
   if (account.provider !== "ZERNIO")
-    return {
-      provider: "META",
-      accessToken: decryptToken(account.accessToken),
-      instagramId: account.instagramId,
-    };
+    return { provider: "META", accessToken: decryptToken(account.accessToken) };
   if (!account.zernioAccountId)
     throw new Error("Zernio account is not connected");
   const connection = await prisma.zernioConnection.findUnique({

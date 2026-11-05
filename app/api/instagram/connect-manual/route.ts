@@ -12,17 +12,22 @@ import {
 
 export const runtime = "nodejs";
 
+// A long-lived Instagram user token is valid ~60 days; the refresh cron
+// (ig_refresh_token) extends it, so store a real expiry rather than null.
+const LONG_LIVED_TOKEN_SECONDS = 5184000;
+
 /**
- * Connect an Instagram account using a unified-login system-user token (SUAT).
+ * Connect an Instagram account with a token generated in the Meta App Dashboard.
  *
- * New Meta apps can only use unified login (Facebook Login for Business), which
- * has no Instagram-login OAuth. For your own accounts you generate a never-
- * expiring system-user token per account in the Meta App Dashboard
- * (Use case → Generate access tokens → Add account) and POST it here with the
- * Instagram account id. We fetch the profile, subscribe the account to the
- * comments + messages webhooks, and store the (encrypted) token.
+ * New Meta apps can no longer run the Instagram-login OAuth redirect, so instead
+ * of the connect/callback round trip you generate a long-lived token per account
+ * in the dashboard (Instagram API use case -> step 2 "Generate access tokens" ->
+ * "Add account"/"Generate token") and POST it here. The token is an Instagram
+ * user token, so everything after this works exactly like the OAuth path did:
+ * we read the profile from graph.instagram.com/me, subscribe the account to the
+ * comments + messages webhooks, and store the encrypted token with its expiry.
  *
- * Body: { instagramId: string, accessToken: string }
+ * Body: { accessToken: string }  (instagramId is derived from the token)
  */
 export async function POST(request: NextRequest) {
   const context = await getCurrentWorkspaceContext();
@@ -39,7 +44,7 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  let body: { instagramId?: string; accessToken?: string };
+  let body: { accessToken?: string };
   try {
     body = await request.json();
   } catch {
@@ -49,19 +54,25 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  const instagramId = body.instagramId?.trim();
   const accessToken = body.accessToken?.trim();
-  if (!instagramId || !accessToken) {
+  if (!accessToken) {
     return NextResponse.json(
-      { success: false, error: "instagramId and accessToken are required" },
+      { success: false, error: "accessToken is required" },
       { status: 400 }
     );
   }
 
   try {
-    // Validates the token + id against Graph, and gives us the handle/name to
-    // display. Throws (and we surface the Meta error) if either is wrong.
-    const info = await getUserInfo(accessToken, instagramId);
+    // Validates the token and resolves the account (and username) in one call.
+    // Throws (and we surface the Meta error) if the token is wrong.
+    const info = await getUserInfo(accessToken);
+    const instagramId = String(info.user_id ?? info.id ?? "");
+    if (!instagramId) {
+      return NextResponse.json(
+        { success: false, error: "Could not resolve Instagram account id from token" },
+        { status: 502 }
+      );
+    }
 
     let webhookSubscribed = false;
     try {
@@ -83,9 +94,7 @@ export async function POST(request: NextRequest) {
       username: info.username,
       name: info.name ?? null,
       accessToken: encryptToken(accessToken),
-      // Unified-login system-user tokens do not expire, so there is nothing for
-      // the refresh cron to do (it only picks up rows with a non-null expiry).
-      tokenExpiresAt: null,
+      tokenExpiresAt: new Date(Date.now() + LONG_LIVED_TOKEN_SECONDS * 1000),
       webhookSubscribed,
     };
 
@@ -113,7 +122,12 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json({
       success: true,
-      data: { instagramId, username: info.username, name: info.name, webhookSubscribed },
+      data: {
+        instagramId,
+        username: info.username,
+        name: info.name,
+        webhookSubscribed,
+      },
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error";
