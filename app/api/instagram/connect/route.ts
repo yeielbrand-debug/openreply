@@ -1,4 +1,4 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import {
   canManageWorkspace,
   getCurrentWorkspaceContext,
@@ -6,7 +6,7 @@ import {
 import { getBaseUrl, getMissingInstagramOAuthEnv } from "@/lib/env";
 import { createOAuthState, getAuthorizationUrl } from "@/lib/meta/oauth";
 
-export async function GET() {
+export async function GET(request: NextRequest) {
   const context = await getCurrentWorkspaceContext();
   if (!context) {
     return NextResponse.redirect(`${getBaseUrl()}/login`);
@@ -27,8 +27,13 @@ export async function GET() {
     );
   }
 
+  // The unified-login dialog hands back a system-user token that can't list the
+  // Instagram accounts it was granted. When we already know the id (a business
+  // asset shown in the dashboard/dialog), pass it as ?account=<ig id> and the
+  // callback connects it directly.
+  const account = request.nextUrl.searchParams.get("account") ?? undefined;
   const redirectUri = `${getBaseUrl()}/api/instagram/callback`;
-  const state = createOAuthState(context.workspaceId);
+  const state = createOAuthState(context.workspaceId, account);
 
   return NextResponse.redirect(getAuthorizationUrl(redirectUri, state));
 }

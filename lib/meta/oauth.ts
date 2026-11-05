@@ -33,6 +33,9 @@ const STATE_MAX_AGE_MS = 10 * 60 * 1000;
 interface OAuthStatePayload {
   workspaceId: string;
   ts: number;
+  // The Instagram account id to connect, when the caller already knows it
+  // (business-asset accounts a system-user token reaches but can't enumerate).
+  account?: string;
 }
 
 function base64UrlEncode(value: string): string {
@@ -49,9 +52,16 @@ function signState(payload: string): string {
     .digest("base64url");
 }
 
-export function createOAuthState(workspaceId: string): string {
+export function createOAuthState(
+  workspaceId: string,
+  account?: string
+): string {
   const payload = base64UrlEncode(
-    JSON.stringify({ workspaceId, ts: Date.now() } satisfies OAuthStatePayload)
+    JSON.stringify({
+      workspaceId,
+      ts: Date.now(),
+      ...(account ? { account } : {}),
+    } satisfies OAuthStatePayload)
   );
   return `${payload}.${signState(payload)}`;
 }

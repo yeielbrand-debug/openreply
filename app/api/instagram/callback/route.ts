@@ -61,7 +61,12 @@ export async function GET(request: NextRequest) {
       shortLivedToken
     );
 
-    const igIds = await getGrantedInstagramAccounts(longLivedToken);
+    let igIds = await getGrantedInstagramAccounts(longLivedToken);
+    // A system-user token can't enumerate its Instagram accounts, so fall back
+    // to the id the caller passed through state (a known business asset).
+    if (igIds.length === 0 && state.account) {
+      igIds = [state.account];
+    }
     if (igIds.length === 0) {
       // The token works but we couldn't read which Instagram account it
       // unlocked. Capture what the token actually exposes so we can see where
