@@ -1,8 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/db/client";
-import { getBaseUrl } from "@/lib/env";
+import { getBaseUrl, getMetaGraphApiVersion, requireEnv } from "@/lib/env";
 import {
+  debugToken,
   getGrantedInstagramAccounts,
   getLongLivedToken,
   getUserInfo,
@@ -62,6 +63,10 @@ export async function GET(request: NextRequest) {
 
     const igIds = await getGrantedInstagramAccounts(longLivedToken);
     if (igIds.length === 0) {
+      // The token works but we couldn't read which Instagram account it
+      // unlocked. Capture what the token actually exposes so we can see where
+      // the id lives (none of these responses contain the token itself).
+      const diagnostic = await collectAccountDiscoveryDiagnostic(longLivedToken);
       await prisma.operationalEvent
         .create({
           data: {
@@ -70,7 +75,7 @@ export async function GET(request: NextRequest) {
             workspaceId: state.workspaceId,
             message:
               "Instagram connect: the authorization granted no Instagram account",
-            payload: {},
+            payload: JSON.parse(JSON.stringify(diagnostic)),
           },
         })
         .catch(() => {});
@@ -158,4 +163,44 @@ export async function GET(request: NextRequest) {
       .catch(() => {});
     return NextResponse.redirect(`${baseUrl}/settings?instagram=error`);
   }
+}
+
+// Temporary: dump the places an Instagram account id might live for a unified
+// login token, so the discovery step can be pointed at the right one.
+async function collectAccountDiscoveryDiagnostic(
+  userToken: string
+): Promise<Record<string, unknown>> {
+  const base = `https://graph.facebook.com/${getMetaGraphApiVersion()}`;
+  async function get(path: string) {
+    try {
+      const res = await fetch(`${base}/${path}`, {
+        headers: { Authorization: `Bearer ${userToken}` },
+        cache: "no-store",
+      });
+      const text = await res.text();
+      try {
+        return JSON.parse(text);
+      } catch {
+        return text.slice(0, 500);
+      }
+    } catch (e) {
+      return { error: e instanceof Error ? e.message : String(e) };
+    }
+  }
+
+  const out: Record<string, unknown> = {};
+  try {
+    const appToken = `${requireEnv("FACEBOOK_APP_ID")}|${requireEnv(
+      "FACEBOOK_APP_SECRET"
+    )}`;
+    out.debug_token = await debugToken(userToken, appToken);
+  } catch (e) {
+    out.debug_token = { error: e instanceof Error ? e.message : String(e) };
+  }
+  out.me = await get("me?fields=id,name");
+  out.me_accounts = await get(
+    "me/accounts?fields=name,instagram_business_account{id,username}"
+  );
+  out.me_businesses = await get("me/businesses?fields=id,name");
+  return out;
 }
